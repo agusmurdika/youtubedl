@@ -230,6 +230,17 @@ class PlayerRequestHandler(SimpleHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):
+        try:
+            self._do_GET_impl()
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+        except Exception:
+            try:
+                self.send_error(500)
+            except Exception:
+                pass
+
+    def _do_GET_impl(self):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
 
@@ -373,8 +384,13 @@ class PlayerRequestHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(data)
+        except (ConnectionResetError, BrokenPipeError):
+            pass
         except Exception:
-            self.send_error(500)
+            try:
+                self.send_error(500)
+            except Exception:
+                pass
 
     def serve_video(self, filepath):
         """Serve video or audio with Range request support (essential for seeking)."""
@@ -446,7 +462,21 @@ class PlayerRequestHandler(SimpleHTTPRequestHandler):
         except (ConnectionResetError, BrokenPipeError):
             pass
         except Exception:
-            self.send_error(500)
+            try:
+                self.send_error(500)
+            except Exception:
+                pass
+
+
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """Threading HTTPServer that suppresses BrokenPipeError / ConnectionResetError on client disconnect."""
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        exc_type, _, _ = sys.exc_info()
+        if exc_type in (BrokenPipeError, ConnectionResetError):
+            return
+        super().handle_error(request, client_address)
 
 
 def main():
@@ -482,7 +512,7 @@ def main():
     # Create handler with shared video cache
     handler = partial(PlayerRequestHandler, video_cache=video_cache)
 
-    server = ThreadingHTTPServer(("0.0.0.0", port), handler)
+    server = QuietThreadingHTTPServer(("0.0.0.0", port), handler)
     server.daemon_threads = True
 
     def shutdown(signum, frame):
