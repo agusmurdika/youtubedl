@@ -1,0 +1,16 @@
+{
+  "download_dir": "downloads",
+  "format_container": "mp4",
+  "embed_thumbnail": true,
+  "save_thumbnail_file": false,
+  "embed_metadata": true,
+  "max_resolution": null,
+  "desktop_notifications": true,
+  "prevent_re_download": true,
+  "clipboard_check_interval": 0.8,
+  "max_retries": 25,
+  "retry_delay_seconds": 5,
+  "auto_retry_on_network_loss": true,
+  "multi_audio": true,
+  "download_indonesian_dub": true
+}
