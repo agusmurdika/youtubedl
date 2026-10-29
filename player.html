@@ -1289,10 +1289,12 @@
       <div class="sidebar-header">
         <div class="sidebar-title">Daftar Video (<span id="sidebarCountText">0</span>)</div>
         <select class="sort-select" id="sortSelect" onchange="applySorting()">
-          <option value="newest">Terbaru Ditambahkan</option>
+          <option value="newest" selected>Terbaru Ditambahkan</option>
+          <option value="oldest">Terlama Ditambahkan</option>
           <option value="duration_desc">Durasi Terpanjang</option>
           <option value="duration_asc">Durasi Terpendek</option>
           <option value="title_asc">Nama (A - Z)</option>
+          <option value="title_desc">Nama (Z - A)</option>
         </select>
       </div>
 
@@ -1434,7 +1436,7 @@
       try {
         const resp = await fetch("/api/videos");
         videos = await resp.json();
-        renderSidebar();
+        applySorting();
         updateStats();
 
         // Auto select first video if available
@@ -1720,12 +1722,16 @@
       const mode = document.getElementById("sortSelect").value;
       if (mode === "newest") {
         videos.sort((a, b) => (b.date_modified || 0) - (a.date_modified || 0));
+      } else if (mode === "oldest") {
+        videos.sort((a, b) => (a.date_modified || 0) - (b.date_modified || 0));
       } else if (mode === "duration_desc") {
-        videos.sort((a, b) => b.duration - a.duration);
+        videos.sort((a, b) => (b.duration || 0) - (a.duration || 0));
       } else if (mode === "duration_asc") {
-        videos.sort((a, b) => a.duration - b.duration);
+        videos.sort((a, b) => (a.duration || 0) - (b.duration || 0));
       } else if (mode === "title_asc") {
-        videos.sort((a, b) => a.title.localeCompare(b.title));
+        videos.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+      } else if (mode === "title_desc") {
+        videos.sort((a, b) => (b.title || "").localeCompare(a.title || ""));
       }
       renderSidebar();
     }

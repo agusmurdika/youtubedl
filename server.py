@@ -6,6 +6,7 @@ Serves videos from ./downloads/ and provides a web-based player at http://localh
 
 import os
 import sys
+import re
 import json
 import signal
 import shutil
@@ -195,7 +196,7 @@ def generate_thumbnails():
 
     for filepath in video_files:
         bn = os.path.basename(filepath)
-        if bn.endswith(".part") or ".temp." in bn or bn.startswith("."):
+        if bn.endswith(".part") or ".temp." in bn or bn.startswith(".") or re.search(r'\.f[0-9]+(\.|$)', bn):
             continue
         ensure_thumbnail_for_video(filepath)
 
@@ -208,11 +209,11 @@ def scan_videos() -> list:
     for ext in extensions:
         video_files.extend(glob.glob(os.path.join(DOWNLOADS_DIR, ext)))
 
-    # Filter out incomplete, temporary or hidden files
+    # Filter out incomplete, temporary, raw stream or hidden files
     valid_files = []
     for filepath in video_files:
         bn = os.path.basename(filepath)
-        if bn.endswith(".part") or ".temp." in bn or bn.startswith("."):
+        if bn.endswith(".part") or ".temp." in bn or bn.startswith(".") or re.search(r'\.f[0-9]+(\.|$)', bn):
             continue
         valid_files.append(filepath)
 
