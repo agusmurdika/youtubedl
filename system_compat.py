@@ -6,6 +6,10 @@ Ensures seamless execution across Windows, macOS, and Linux desktop environments
 
 import os
 import sys
+import json
+import re
+import urllib.request
+import urllib.parse
 import shutil
 import platform
 import subprocess
@@ -324,3 +328,94 @@ def open_in_browser(url: str):
             subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
+
+_TITLE_CACHE: Dict[str, str] = {}
+_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads", ".title_cache.json")
+
+
+def sanitize_filename(name: str) -> str:
+    """
+    Sanitizes string for cross-platform file system compatibility (Windows/NTFS/exFAT/Linux/macOS).
+    Replaces illegal characters with safe equivalents.
+    """
+    replacements = {
+        "/": "-",
+        "\\": "-",
+        ":": " -",
+        "*": "",
+        "?": "？",
+        "\"": "'",
+        "<": "(",
+        ">": ")",
+        "|": "-",
+    }
+    res = name
+    for bad, good in replacements.items():
+        res = res.replace(bad, good)
+    # Remove leading/trailing spaces and dots
+    res = res.strip(" .")
+    # Collapse consecutive spaces
+    res = re.sub(r'\s+', ' ', res)
+    return res or "Video"
+
+
+def _load_title_cache():
+    global _TITLE_CACHE
+    if os.path.isfile(_CACHE_PATH):
+        try:
+            with open(_CACHE_PATH, "r", encoding="utf-8") as f:
+                _TITLE_CACHE = json.load(f)
+        except Exception:
+            _TITLE_CACHE = {}
+
+
+def _save_title_cache():
+    try:
+        os.makedirs(os.path.dirname(_CACHE_PATH), exist_ok=True)
+        tmp = _CACHE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_TITLE_CACHE, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _CACHE_PATH)
+    except Exception:
+        pass
+
+
+def translate_to_indonesian(text: str) -> str:
+    """
+    Translates title/text to Indonesian using Google Translate API.
+    Uses local cache to minimize network calls and ensure 0ms latency on repeat calls.
+    Returns original text if translation fails or if text is already Indonesian.
+    """
+    if not text or not text.strip():
+        return text
+
+    clean_text = text.strip()
+
+    if not _TITLE_CACHE:
+        _load_title_cache()
+
+    if clean_text in _TITLE_CACHE:
+        return _TITLE_CACHE[clean_text]
+
+    try:
+        encoded = urllib.parse.quote(clean_text)
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=id&dt=t&q={encoded}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=5) as res:
+            data = json.loads(res.read().decode("utf-8"))
+            translated = "".join([part[0] for part in data[0] if part and part[0]]).strip()
+            if translated:
+                _TITLE_CACHE[clean_text] = translated
+                _save_title_cache()
+                return translated
+    except Exception:
+        pass
+
+    return clean_text
+

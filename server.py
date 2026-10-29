@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import signal
+import shutil
 import subprocess
 import glob
 import urllib.parse
@@ -85,9 +86,17 @@ def get_video_metadata(filepath: str) -> dict:
 
         # Check if an alternate audio track was pre-extracted or saved separately
         name_no_ext = os.path.splitext(os.path.basename(filepath))[0]
+        vid_id = ""
+        if "[" in name_no_ext and name_no_ext.endswith("]"):
+            vid_id = name_no_ext[name_no_ext.rfind("[") + 1 : -1].strip()
+
         for ext in (".webm", ".m4a", ".opus", ".ogg", ".mp3"):
             alt_audio = os.path.join(AUDIOS_DIR, f"{name_no_ext}_track1{ext}")
-            if os.path.exists(alt_audio) and len(audio_tracks) <= 1:
+            found = os.path.exists(alt_audio)
+            if not found and vid_id:
+                m = glob.glob(os.path.join(AUDIOS_DIR, f"*{vid_id}*_track1{ext}"))
+                found = bool(m)
+            if found and len(audio_tracks) <= 1:
                 audio_tracks.append({
                     "index": 1,
                     "language": "id",
@@ -115,6 +124,77 @@ def get_video_metadata(filepath: str) -> dict:
         }
 
 
+def ensure_thumbnail_for_video(filepath: str) -> str:
+    """Ensures thumbnail exists for video in THUMBS_DIR. Returns thumbnail filename or ''."""
+    os.makedirs(THUMBS_DIR, exist_ok=True)
+    filename = os.path.basename(filepath)
+    name_no_ext = os.path.splitext(filename)[0]
+    thumb_path = os.path.join(THUMBS_DIR, name_no_ext + ".jpg")
+
+    if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) >= 1000:
+        return name_no_ext + ".jpg"
+
+    # Check if a thumbnail exists matching the [video_id]
+    vid_id = ""
+    if "[" in name_no_ext and name_no_ext.endswith("]"):
+        vid_id = name_no_ext[name_no_ext.rfind("[") + 1 : -1].strip()
+    if vid_id:
+        existing = glob.glob(os.path.join(THUMBS_DIR, f"*{vid_id}*.jpg"))
+        for ef in existing:
+            if os.path.isfile(ef) and os.path.getsize(ef) >= 1000:
+                return os.path.basename(ef)
+
+    # 1. Mutagen covr tag extraction
+    try:
+        from mutagen.mp4 import MP4
+        mp4 = MP4(filepath)
+        if mp4.tags and "covr" in mp4.tags and len(mp4.tags["covr"]) > 0:
+            with open(thumb_path, "wb") as f:
+                f.write(bytes(mp4.tags["covr"][0]))
+            if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) >= 1000:
+                return name_no_ext + ".jpg"
+    except Exception:
+        pass
+
+    # 2. ffmpegthumbnailer
+    if shutil.which("ffmpegthumbnailer"):
+        try:
+            subprocess.run(
+                ["ffmpegthumbnailer", "-i", filepath, "-o", thumb_path, "-m", "-s", "480"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
+            )
+            if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) >= 1000:
+                return name_no_ext + ".jpg"
+        except Exception:
+            pass
+
+    # 3. ffmpeg fallback
+    if shutil.which("ffmpeg"):
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", filepath, "-ss", "00:00:03", "-vframes", "1", "-vf", "scale=480:-1", thumb_path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
+            )
+            if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) >= 1000:
+                return name_no_ext + ".jpg"
+        except Exception:
+            pass
+
+    return ""
+
+
+def generate_thumbnails():
+    """Generate thumbnails for any videos that don't have one yet."""
+    os.makedirs(THUMBS_DIR, exist_ok=True)
+    extensions = ("*.mp4", "*.mkv", "*.webm", "*.avi", "*.mov")
+    video_files = []
+    for ext in extensions:
+        video_files.extend(glob.glob(os.path.join(DOWNLOADS_DIR, ext)))
+
+    for filepath in video_files:
+        ensure_thumbnail_for_video(filepath)
+
+
 def scan_videos() -> list:
     """Scan downloads directory for video files and build metadata list."""
     videos = []
@@ -130,23 +210,29 @@ def scan_videos() -> list:
         name_no_ext = os.path.splitext(filename)[0]
 
         # Extract title: remove [videoId] suffix if present
-        title = name_no_ext
-        if "[" in title and title.endswith("]"):
-            title = title[:title.rfind("[")].strip()
+        raw_title = name_no_ext
+        vid_id = ""
+        if "[" in raw_title and raw_title.endswith("]"):
+            vid_id = raw_title[raw_title.rfind("[") + 1 : -1].strip()
+            raw_title = raw_title[:raw_title.rfind("[")].strip()
 
-        # Check for thumbnail
-        thumb_path = os.path.join(THUMBS_DIR, name_no_ext + ".jpg")
-        has_thumb = os.path.exists(thumb_path)
+        # Ensure title is in Indonesian
+        title = system_compat.translate_to_indonesian(raw_title)
+
+        # Check or generate thumbnail
+        thumb_file = ensure_thumbnail_for_video(filepath)
+        has_thumb = bool(thumb_file)
 
         # Get metadata
         meta = get_video_metadata(filepath)
 
         encoded_filename = urllib.parse.quote(filename)
-        encoded_thumb = urllib.parse.quote(name_no_ext + ".jpg") if has_thumb else ""
+        encoded_thumb = urllib.parse.quote(thumb_file) if has_thumb else ""
 
         videos.append({
             "filename": filename,
             "title": title,
+            "video_id": vid_id,
             "duration": meta["duration"],
             "width": meta["width"],
             "height": meta["height"],
@@ -159,60 +245,6 @@ def scan_videos() -> list:
         })
 
     return videos
-
-
-def generate_thumbnails():
-    """Generate thumbnails for any videos that don't have one yet."""
-    os.makedirs(THUMBS_DIR, exist_ok=True)
-    extensions = ("*.mp4", "*.mkv", "*.webm", "*.avi", "*.mov")
-    video_files = []
-    for ext in extensions:
-        video_files.extend(glob.glob(os.path.join(DOWNLOADS_DIR, ext)))
-
-    for filepath in video_files:
-        filename = os.path.basename(filepath)
-        name_no_ext = os.path.splitext(filename)[0]
-        thumb_path = os.path.join(THUMBS_DIR, name_no_ext + ".jpg")
-
-        # Extract real YouTube cover art if not present
-        if not os.path.exists(thumb_path) or os.path.getsize(thumb_path) < 15000:
-            print(f"  Extracting real YouTube thumbnail: {name_no_ext}.jpg")
-            try:
-                # 1. Use ffmpegthumbnailer if installed
-                if shutil.which("ffmpegthumbnailer"):
-                    try:
-                        subprocess.run(
-                            ["ffmpegthumbnailer", "-i", filepath, "-o", thumb_path, "-m", "-s", "480"],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
-                        )
-                    except Exception:
-                        pass
-
-                # 2. If needed, try mutagen
-                if not os.path.exists(thumb_path) or os.path.getsize(thumb_path) < 1000:
-                    try:
-                        from mutagen.mp4 import MP4
-                        mp4 = MP4(filepath)
-                        if mp4.tags and "covr" in mp4.tags and len(mp4.tags["covr"]) > 0:
-                            with open(thumb_path, "wb") as f:
-                                f.write(bytes(mp4.tags["covr"][0]))
-                    except Exception:
-                        pass
-
-                # 3. Fallback only if no cover art exists
-                if not os.path.exists(thumb_path) or os.path.getsize(thumb_path) < 1000:
-                    subprocess.run(
-                        [
-                            "ffmpeg", "-y", "-i", filepath,
-                            "-ss", "00:00:05",
-                            "-vframes", "1",
-                            "-vf", "scale=480:-1",
-                            thumb_path
-                        ],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
-                    )
-            except Exception as e:
-                print(f"  Warning: Failed to generate thumbnail for {filename}: {e}")
 
 
 class PlayerRequestHandler(SimpleHTTPRequestHandler):
@@ -362,13 +394,35 @@ class PlayerRequestHandler(SimpleHTTPRequestHandler):
             self.send_error(404)
             return
 
-        # Serve thumbnail files
+        # Serve thumbnail files (with on-demand extraction fallback)
         if path.startswith("/thumbs/"):
             thumb_filename = path[len("/thumbs/"):]
             thumb_path = os.path.join(THUMBS_DIR, thumb_filename)
-            if os.path.isfile(thumb_path):
+            if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) >= 1000:
                 self.serve_file(thumb_path, "image/jpeg")
                 return
+
+            # On-demand generation if thumbnail file is missing
+            name_no_ext = os.path.splitext(thumb_filename)[0]
+            vid_id = ""
+            if "[" in name_no_ext and name_no_ext.endswith("]"):
+                vid_id = name_no_ext[name_no_ext.rfind("[") + 1 : -1].strip()
+
+            video_matches = glob.glob(os.path.join(DOWNLOADS_DIR, f"{name_no_ext}.*"))
+            if not video_matches and vid_id:
+                video_matches = glob.glob(os.path.join(DOWNLOADS_DIR, f"*{vid_id}*.*"))
+
+            for vm in video_matches:
+                if vm.endswith((".mp4", ".mkv", ".webm")) and os.path.isfile(vm):
+                    gen_name = ensure_thumbnail_for_video(vm)
+                    if gen_name:
+                        gen_file = os.path.join(THUMBS_DIR, gen_name)
+                        if os.path.isfile(gen_file):
+                            self.serve_file(gen_file, "image/jpeg")
+                            return
+
+            self.send_error(404)
+            return
 
         # 404
         self.send_error(404)

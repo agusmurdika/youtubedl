@@ -13,6 +13,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 import yt_dlp
+import system_compat
 
 try:
     from mutagen.mp4 import MP4, MP4Cover
@@ -113,6 +114,13 @@ class YouTubeDownloader:
             "socket_timeout": 20,
         }
 
+        if dl_indonesian:
+            ydl_opts["extractor_args"] = {
+                "youtube": {
+                    "lang": ["id"]
+                }
+            }
+
         progress_hooks = []
         if progress_callback:
             progress_hooks.append(progress_callback)
@@ -146,9 +154,13 @@ class YouTubeDownloader:
     def _ensure_mp4_cover(self, video_id: str):
         """
         Ensures the MP4 file has the 'covr' metadata tag using mutagen,
-        and cleans up any separate image files if save_thumbnail_file is False.
+        saves the high-res thumbnail to downloads/thumbs/ so the local player
+        and file manager can display it instantly, and cleans up any loose image
+        files in downloads/ if save_thumbnail_file is False.
         """
         keep_thumb_file = self.config.get("save_thumbnail_file", False)
+        thumbs_dir = os.path.join(self.download_dir, "thumbs")
+        os.makedirs(thumbs_dir, exist_ok=True)
 
         # Locate the downloaded video and any thumbnail image
         video_matches = glob.glob(os.path.join(self.download_dir, f"*{video_id}*.mp4"))
@@ -159,21 +171,57 @@ class YouTubeDownloader:
             glob.glob(os.path.join(self.download_dir, f"*{video_id}*.png"))
         )
 
-        if MUTAGEN_AVAILABLE and video_matches and image_matches:
-            target_mp4 = video_matches[0]
-            thumb_file = image_matches[0]
+        target_mp4 = video_matches[0] if video_matches else None
+        base_name = os.path.splitext(os.path.basename(target_mp4))[0] if target_mp4 else f"video_{video_id}"
+        dest_thumb = os.path.join(thumbs_dir, f"{base_name}.jpg")
+
+        # 1. If an image file was downloaded by yt-dlp, copy it to downloads/thumbs/
+        if image_matches:
+            thumb_src = image_matches[0]
             try:
-                mp4 = MP4(target_mp4)
-                if mp4.tags is not None and "covr" not in mp4.tags:
-                    with open(thumb_file, "rb") as f:
-                        img_bytes = f.read()
-                    img_fmt = MP4Cover.FORMAT_PNG if thumb_file.endswith(".png") else MP4Cover.FORMAT_JPEG
-                    mp4.tags["covr"] = [MP4Cover(img_bytes, imageformat=img_fmt)]
-                    mp4.save()
+                import shutil
+                shutil.copy2(thumb_src, dest_thumb)
             except Exception:
                 pass
 
-        # If user does NOT want a separate thumbnail file, remove all image matches
+        # 2. Embed cover into MP4 metadata if mutagen is available
+        if MUTAGEN_AVAILABLE and target_mp4 and os.path.isfile(target_mp4):
+            try:
+                if image_matches:
+                    thumb_file = image_matches[0]
+                    mp4 = MP4(target_mp4)
+                    if mp4.tags is not None and "covr" not in mp4.tags:
+                        with open(thumb_file, "rb") as f:
+                            img_bytes = f.read()
+                        img_fmt = MP4Cover.FORMAT_PNG if thumb_file.endswith(".png") else MP4Cover.FORMAT_JPEG
+                        mp4.tags["covr"] = [MP4Cover(img_bytes, imageformat=img_fmt)]
+                        mp4.save()
+                elif not os.path.isfile(dest_thumb) or os.path.getsize(dest_thumb) < 1000:
+                    mp4 = MP4(target_mp4)
+                    if mp4.tags and "covr" in mp4.tags and len(mp4.tags["covr"]) > 0:
+                        with open(dest_thumb, "wb") as f:
+                            f.write(bytes(mp4.tags["covr"][0]))
+            except Exception:
+                pass
+
+        # 3. Fallback: if dest_thumb still missing, generate via ffmpeg / ffmpegthumbnailer
+        if target_mp4 and os.path.isfile(target_mp4) and (not os.path.isfile(dest_thumb) or os.path.getsize(dest_thumb) < 1000):
+            try:
+                import shutil
+                if shutil.which("ffmpegthumbnailer"):
+                    subprocess.run(
+                        ["ffmpegthumbnailer", "-i", target_mp4, "-o", dest_thumb, "-m", "-s", "480"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
+                    )
+                elif shutil.which("ffmpeg"):
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", target_mp4, "-ss", "00:00:03", "-vframes", "1", "-vf", "scale=480:-1", dest_thumb],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
+                    )
+            except Exception:
+                pass
+
+        # Clean up temporary loose image in downloads/ if user doesn't want loose thumbnails
         if not keep_thumb_file:
             for img in image_matches:
                 try:
@@ -329,8 +377,30 @@ class YouTubeDownloader:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 if info:
-                    result["title"] = info.get("title", "Unknown Title")
-                    result["video_id"] = info.get("id", "")
+                    raw_title = info.get("title", "Unknown Title")
+                    video_id = info.get("id", "")
+                    result["video_id"] = video_id
+
+                    # Ensure Indonesian title localization
+                    id_title = system_compat.translate_to_indonesian(raw_title)
+                    safe_id_title = system_compat.sanitize_filename(id_title)
+                    result["title"] = id_title
+
+                    # Find downloaded video file
+                    video_matches = glob.glob(os.path.join(self.download_dir, f"*{video_id}*.mp4"))
+                    target_mp4 = video_matches[0] if video_matches else ""
+
+                    # Rename downloaded video to localized Indonesian title if different
+                    if target_mp4 and safe_id_title:
+                        expected_mp4 = os.path.join(self.download_dir, f"{safe_id_title} [{video_id}].mp4")
+                        if target_mp4 != expected_mp4 and not os.path.exists(expected_mp4):
+                            try:
+                                os.replace(target_mp4, expected_mp4)
+                                target_mp4 = expected_mp4
+                            except Exception:
+                                pass
+
+                    result["filepath"] = target_mp4
 
                     # Determine final resolution display
                     height = info.get("height")
@@ -348,9 +418,18 @@ class YouTubeDownloader:
                         else:
                             result["resolution"] = f"{height}p"
 
-                    # Verify embedded cover & clean up any separate image file
+                    # Verify embedded cover & save thumbnail into downloads/thumbs/
                     if result["video_id"]:
                         self._ensure_mp4_cover(result["video_id"])
+
+                    # Update embedded MP4 title tag to Indonesian
+                    if target_mp4 and os.path.isfile(target_mp4) and MUTAGEN_AVAILABLE:
+                        try:
+                            mp4 = MP4(target_mp4)
+                            mp4.tags["\xa9nam"] = id_title
+                            mp4.save()
+                        except Exception:
+                            pass
 
                     result["success"] = True
 

@@ -1,5 +1,7 @@
 import os
 import sys
+import re
+import glob
 import json
 import time
 import queue
@@ -66,11 +68,34 @@ def load_history() -> Set[str]:
         try:
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
                 for line in f:
-                    item_id = line.strip()
-                    if item_id:
-                        history.add(item_id)
+                    clean = line.strip()
+                    if clean:
+                        # Extract 11-char ID even if user or history has full URL
+                        m = re.search(r'([a-zA-Z0-9_-]{11})', clean)
+                        if m:
+                            history.add(m.group(1))
+                        else:
+                            history.add(clean)
         except Exception:
             pass
+
+    # Sync with completed video files on disk in download_dir
+    try:
+        config = load_config()
+        dl_dir = config.get("download_dir", "downloads")
+        if os.path.isdir(dl_dir):
+            for f in os.listdir(dl_dir):
+                fpath = os.path.join(dl_dir, f)
+                if os.path.isfile(fpath) and f.endswith((".mp4", ".mkv", ".webm", ".avi", ".mov")) and not f.endswith(".part"):
+                    if os.path.getsize(fpath) > 1024 * 1024:
+                        name_no_ext = os.path.splitext(f)[0]
+                        if "[" in name_no_ext and name_no_ext.endswith("]"):
+                            vid_id = name_no_ext[name_no_ext.rfind("[") + 1 : -1].strip()
+                            if vid_id and len(vid_id) == 11:
+                                history.add(vid_id)
+    except Exception:
+        pass
+
     return history
 
 def save_to_history(item_id: str):
@@ -159,6 +184,18 @@ class AppState:
     def is_in_queue_or_active(self, item_id: str) -> bool:
         with self.lock:
             return (item_id in self.queued_ids) or (self.current_id == item_id)
+
+    def is_already_on_disk(self, item_id: str) -> bool:
+        """Checks if a complete non-partial video file already exists on disk."""
+        dl_dir = self.config.get("download_dir", "downloads")
+        if not os.path.isdir(dl_dir):
+            return False
+        matches = glob.glob(os.path.join(dl_dir, f"*{item_id}*.*"))
+        for m in matches:
+            if m.endswith((".mp4", ".mkv", ".webm", ".avi", ".mov")) and not m.endswith(".part"):
+                if os.path.isfile(m) and os.path.getsize(m) > 1024 * 1024:
+                    return True
+        return False
 
     def add_to_queue(self, item: Dict[str, str], persist: bool = True):
         with self.lock:
@@ -419,14 +456,22 @@ def clipboard_monitor(state: AppState):
                     item_url = item["url"]
                     item_type = item.get("type", "video")
 
-                    # Check if already in queue or actively downloading
+                    # 1. Check if already in queue or actively downloading
                     if state.is_in_queue_or_active(item_id):
+                        print(f"{Colors.YELLOW}  [Lewati Duplikat] Video ini sedang dalam antrean atau sedang diunduh: {item_url}{Colors.RESET}")
                         continue
 
-                    # Check history if prevention is enabled
-                    if state.config.get("prevent_re_download", True) and (item_id in state.history):
-                        print(f"{Colors.DIM}  [Lewati] Video sudah pernah diunduh sebelumnya: {item_url}{Colors.RESET}")
-                        continue
+                    # 2. Check history and existing files on disk
+                    if state.config.get("prevent_re_download", True):
+                        if item_id in state.history:
+                            print(f"{Colors.DIM}  [Lewati Duplikat] Video sudah pernah diunduh sebelumnya: {item_url}{Colors.RESET}")
+                            continue
+
+                        if state.is_already_on_disk(item_id):
+                            state.history.add(item_id)
+                            save_to_history(item_id)
+                            print(f"{Colors.DIM}  [Lewati Duplikat] File video sudah ada di folder unduhan: {item_url}{Colors.RESET}")
+                            continue
 
                     # Add new item to download queue
                     state.add_to_queue(item)
