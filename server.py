@@ -131,6 +131,20 @@ def ensure_thumbnail_for_video(filepath: str) -> str:
     name_no_ext = os.path.splitext(filename)[0]
     thumb_path = os.path.join(THUMBS_DIR, name_no_ext + ".jpg")
 
+    # 1. Mutagen covr tag extraction (genuine official YouTube cover art)
+    try:
+        from mutagen.mp4 import MP4
+        mp4 = MP4(filepath)
+        if mp4.tags and "covr" in mp4.tags and len(mp4.tags["covr"]) > 0:
+            covr_bytes = bytes(mp4.tags["covr"][0])
+            if not os.path.isfile(thumb_path) or abs(os.path.getsize(thumb_path) - len(covr_bytes)) > 1000:
+                with open(thumb_path, "wb") as f:
+                    f.write(covr_bytes)
+            if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) >= 1000:
+                return name_no_ext + ".jpg"
+    except Exception:
+        pass
+
     if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) >= 1000:
         return name_no_ext + ".jpg"
 
@@ -144,23 +158,11 @@ def ensure_thumbnail_for_video(filepath: str) -> str:
             if os.path.isfile(ef) and os.path.getsize(ef) >= 1000:
                 return os.path.basename(ef)
 
-    # 1. Mutagen covr tag extraction
-    try:
-        from mutagen.mp4 import MP4
-        mp4 = MP4(filepath)
-        if mp4.tags and "covr" in mp4.tags and len(mp4.tags["covr"]) > 0:
-            with open(thumb_path, "wb") as f:
-                f.write(bytes(mp4.tags["covr"][0]))
-            if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) >= 1000:
-                return name_no_ext + ".jpg"
-    except Exception:
-        pass
-
-    # 2. ffmpegthumbnailer
+    # 2. ffmpegthumbnailer (only if no covr tag exists)
     if shutil.which("ffmpegthumbnailer"):
         try:
             subprocess.run(
-                ["ffmpegthumbnailer", "-i", filepath, "-o", thumb_path, "-m", "-s", "480"],
+                ["ffmpegthumbnailer", "-i", filepath, "-o", thumb_path, "-m", "-s", "720"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
             )
             if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) >= 1000:
@@ -172,7 +174,7 @@ def ensure_thumbnail_for_video(filepath: str) -> str:
     if shutil.which("ffmpeg"):
         try:
             subprocess.run(
-                ["ffmpeg", "-y", "-i", filepath, "-ss", "00:00:03", "-vframes", "1", "-vf", "scale=480:-1", thumb_path],
+                ["ffmpeg", "-y", "-i", filepath, "-ss", "00:00:05", "-vframes", "1", "-vf", "scale=720:-1", thumb_path],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
             )
             if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) >= 1000:
@@ -192,6 +194,9 @@ def generate_thumbnails():
         video_files.extend(glob.glob(os.path.join(DOWNLOADS_DIR, ext)))
 
     for filepath in video_files:
+        bn = os.path.basename(filepath)
+        if bn.endswith(".part") or ".temp." in bn or bn.startswith("."):
+            continue
         ensure_thumbnail_for_video(filepath)
 
 
@@ -203,9 +208,17 @@ def scan_videos() -> list:
     for ext in extensions:
         video_files.extend(glob.glob(os.path.join(DOWNLOADS_DIR, ext)))
 
-    video_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
-
+    # Filter out incomplete, temporary or hidden files
+    valid_files = []
     for filepath in video_files:
+        bn = os.path.basename(filepath)
+        if bn.endswith(".part") or ".temp." in bn or bn.startswith("."):
+            continue
+        valid_files.append(filepath)
+
+    valid_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+
+    for filepath in valid_files:
         filename = os.path.basename(filepath)
         name_no_ext = os.path.splitext(filename)[0]
 
